@@ -1,11 +1,10 @@
-FROM mcr.microsoft.com/playwright:v1.42.0-jammy
+FROM mcr.microsoft.com/playwright:v1.59.1-jammy
 
 WORKDIR /app
 
 COPY package.json .
 RUN npm install
 
-# Playwright browsers déjà inclus dans l'image de base
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 COPY enedis-proxy-server.js .
