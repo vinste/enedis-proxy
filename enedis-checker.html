@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width">
+<title>Check Meteo / Enedis</title>
+<style>
+body{font-family:system-ui,sans-serif;background:#f8f9fa;max-width:900px;margin:40px auto;padding:24px}
+.panel{background:white;border-radius:16px;padding:32px;box-shadow:0 8px 32px rgba(0,0,0,.1);margin-bottom:24px}
+h1{font-size:2.2rem;color:#1a1a1a;margin-bottom:12px}
+.subtitle{color:#666;font-size:1.1rem;margin-bottom:24px}
+.form{display:grid;gap:16px;margin-bottom:24px}
+.row1{display:grid;grid-template-columns:1fr;gap:16px}
+.row2{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+@media(max-width:768px){.row2{grid-template-columns:1fr}}
+.ig{display:grid;gap:8px}
+label{font-weight:600;color:#374151;display:block;margin-bottom:6px}
+input{padding:12px 16px;border:2px solid #e5e7eb;border-radius:12px;font-size:16px;width:100%;transition:all .2s}
+input:focus{border-color:#3b82f6;outline:none;box-shadow:0 0 0 4px rgba(59,130,246,.1)}
+.btn{padding:16px 32px;background:#10b981;color:white;border:none;border-radius:12px;font-size:1.1rem;font-weight:600;cursor:pointer}
+.banner{padding:24px;border-radius:16px;margin:24px 0;font-size:1.6rem;font-weight:800;text-align:center}
+.safe{background:#d1fae5;color:#065f46;border:4px solid #10b981}
+.alert{background:#fee2e2;color:#991b1b;border:4px solid #ef4444}
+.warn{background:#fef3c7;color:#92400e;border:3px solid #f59e0b}
+.loading{background:#f3f4f6;color:#9ca3af;border:3px dashed #d1d5db}
+.enedis-spinner{display:inline-block;width:14px;height:14px;border:2px solid #d1d5db;border-top-color:#6b7280;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-left:6px}
+@keyframes spin{to{transform:rotate(360deg)}}.loading{background:#f3f4f6;color:#9ca3af;border:3px dashed #d1d5db}
+.grid{display:grid;gap:20px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr))}
+.tile{padding:24px;border-radius:16px;text-align:center}
+.tile-title{font-size:1rem;font-weight:700;margin-bottom:8px;text-transform:uppercase}
+.tile-value{font-size:2.2rem;font-weight:900}
+.meta{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));padding:24px 0 0;margin-top:24px;border-top:2px solid #e5e7eb;font-size:.95rem}
+.elink{text-decoration:none;color:#dc2626;font-weight:600;padding:6px 10px;background:#fef2f2;border-radius:8px;border:2px solid #fecaca;display:inline-flex;align-items:center;gap:4px}
+.status{padding:14px;border-radius:12px;margin:12px 0;font-weight:600}
+.loading{background:#fef3c7;color:#92400e}
+.ok{background:#d1fae5;color:#065f46}
+.err{background:#fee2e2;color:#991b1b}
+
+.graph-panel{background:white;border-radius:16px;padding:24px;margin-top:20px;box-shadow:0 4px 16px rgba(0,0,0,.08)}
+.graph-title{font-weight:700;font-size:1.1rem;color:#374151;margin-bottom:16px}
+.graph-wrap{position:relative;height:180px;width:100%}
+canvas#windChart{width:100%!important;height:180px!important}
+.graph-legend{display:flex;gap:20px;margin-top:10px;font-size:.85rem;color:#6b7280}
+.leg-dot{width:12px;height:12px;border-radius:50%;display:inline-block;margin-right:4px}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="panel">
+<h1>Check Meteo / Enedis</h1>
+<p class="subtitle">Rafales + orage/neige + réseau France entière</p>
+<form id="form">
+  <div class="row1">
+    <div class="ig"><label>Adresse France</label><input name="address" placeholder=""></div>
+  </div>
+  <div class="row2">
+    <div class="ig"><label>Coordonnée X Refsite</label><input name="x" placeholder=""></div>
+    <div class="ig"><label>Coordonnée Y Refsite</label><input name="y" placeholder=""></div>
+    <div class="ig"><label>Seuil rafales km/h</label><input name="threshold" value="70" type="number"></div>
+  </div>
+  <button class="btn" type="submit">🔍 ANALYSER</button>
+</form>
+<div id="status" class="status"></div>
+<div id="results"></div>
+<div id="graph-panel" class="graph-panel" style="display:none">
+  <div class="graph-title">🌬️ Rafales & Vent — 3h passées + 3h à venir</div>
+  <div class="graph-wrap"><canvas id="windChart"></canvas></div>
+  <div class="graph-legend">
+    <span><span class="leg-dot" style="background:#ef4444"></span>Rafales (km/h)</span>
+    <span><span class="leg-dot" style="background:#3b82f6"></span>Vent moyen (km/h)</span>
+    <span style="border-left:2px dashed #9ca3af;padding-left:10px">│ Maintenant</span>
+  </div>
+</div>
+
+</div>
+
+<script>
+const ORAGE=[95,96,99], NEIGE=[71,73,75,77,85,86];
+
+// Lambert II étendue IGN - Clarke 1880 (formule officielle)
+function lambert2wgs(x,y){
+  const e=0.08248325676,n=0.7289686274,C=11745793.39;
+  const Xs=600000,Ys=8199695.768,l0=2.33722917*Math.PI/180;
+  const R=Math.sqrt((x-Xs)**2+(y-Ys)**2);
+  const g=Math.atan((x-Xs)/(Ys-y));
+  const lr=(g/n)+l0;
+  const L=-Math.log(Math.abs(R/C))/n;
+  let phi=2*Math.atan(Math.exp(L))-Math.PI/2;
+  for(let i=0;i<10;i++)
+    phi=2*Math.atan(Math.exp(L)*((1+e*Math.sin(phi))/(1-e*Math.sin(phi)))**(e/2))-Math.PI/2;
+  return{lat:phi*180/Math.PI, lon:lr*180/Math.PI};
+}
+
+// Reverse géocodage : housenumber → street → commune → dept
+async function revGeo(lat,lon){
+  for(const type of ['housenumber','street','municipality']){
+    try{
+      const r=await fetch(`https://api-adresse.data.gouv.fr/reverse/?lat=${lat}&lon=${lon}&type=${type}`);
+      const d=await r.json();
+      const f=d.features?.[0]?.properties;
+      if(f && f.postcode && f.citycode){
+        return{
+          cp:f.postcode,
+          insee:f.citycode,
+          city:f.city||'',
+          street:f.street||f.name||''
+        };
+      }
+    }catch(e){}
+  }
+  // fallback geo.api
+  try{
+    const r=await fetch(`https://geo.api.gouv.fr/communes?lat=${lat}&lon=${lon}&fields=nom,code,codePostal,codeDepartement`);
+    const c=await r.json();
+    if(c.length){
+      return{cp:c[0].codePostal||`${c[0].codeDepartement}000`,insee:c[0].code,city:c[0].nom,street:''};
+    }
+  }catch(e){}
+  // fallback dept
+  try{
+    const r=await fetch(`https://geo.api.gouv.fr/departements?lat=${lat}&lon=${lon}`);
+    const d=await r.json();
+    if(d.length) return{cp:`${d[0].code}000`,insee:`${d[0].code}001`,city:`Dépt ${d[0].nom}`,street:''};
+  }catch(e){}
+  return null;
+}
+
+async function geoDirect(addr){
+  const r=await fetch(`https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(addr)}&limit=1`);
+  const d=await r.json();
+  const f=d.features?.[0];
+  if(!f)return null;
+  const[lon,lat]=f.geometry.coordinates, p=f.properties;
+  // street = vide si municipality, sinon p.street (jamais p.name qui est le nom de l'objet)
+  const street = (p.type === 'municipality') ? '' : (p.street || '');
+  return{lat,lon,cp:p.postcode||'',insee:p.citycode||'',street,city:p.city||''};
+}
+
+async function meteo(lat,lon){
+  const p=new URLSearchParams({latitude:lat,longitude:lon,current:'wind_gusts_10m,wind_speed_10m,weather_code',timezone:'Europe/Paris',wind_speed_unit:'kmh'});
+  return(await(await fetch(`https://api.open-meteo.com/v1/forecast?${p}`)).json()).current||{};
+}
+
+// API ORE : vérifier couverture Enedis
+async function oreCheck(insee){
+  try{
+    const r=await fetch(`https://opendata.agenceore.fr/api/explore/v2.1/catalog/datasets/distributeurs-denergie-par-commune/records?where=code_insee_commune%3D%22${insee}%22&limit=1`);
+    const d=await r.json();
+    const rec=d.results?.[0];
+    if(!rec)return{covered:true,grd:'?'};
+    const covered=(rec.code_grd_elec_1||[]).includes('ENED');
+    return{covered,grd:(rec.grd_elec||[]).join(', ')};
+  }catch(e){return{covered:true,grd:'?'};}
+}
+
+function enedisUrl(cp,street,city,insee,lat,lon){
+  const dept=insee.substring(0,2);
+  const cv=encodeURIComponent(`${city} ${cp}`.trim());
+  const cityEnc=encodeURIComponent(city);
+  if(street){
+    // type=street : adresse complète avec rue
+    const a=encodeURIComponent(`${street} ${cp} ${city}`.trim());
+    const s=encodeURIComponent(street);
+    return`https://www.enedis.fr/resultat-panne-interruption?adresse=${a}&insee=${insee}&long=${lon.toFixed(6)}&lat=${lat.toFixed(6)}&type=street&CPVille=${cv}&street=${s}&name=${s}&departement=${dept}&district=&city=${cityEnc}`;
+  } else {
+    // type=municipality : adresse = nom ville, street vide, name = ville
+    const a=encodeURIComponent(city);
+    return`https://www.enedis.fr/resultat-panne-interruption?adresse=${a}&insee=${insee}&long=${lon.toFixed(6)}&lat=${lat.toFixed(6)}&type=municipality&CPVille=${cv}&street=&name=${cityEnc}&departement=${dept}&district=&city=${cityEnc}`;
+  }
+}
+
+const PROXY_URL = 'https://enedis-proxy-7eeu.onrender.com';
+
+async function enedisIncidents(cp,street,city,insee,lat,lon){
+  const url=enedisUrl(cp,street,city,insee,lat,lon);
+  try{
+    const params=new URLSearchParams({cp,street,city,insee,lat,lon});
+    const r=await fetch(`${PROXY_URL}/enedis?${params}`,{signal:AbortSignal.timeout(18000)});
+    if(!r.ok) throw new Error('proxy '+r.status);
+    const d=await r.json();
+    return{
+      incident: d.incident||false,
+      travaux:  d.travaux||false,
+      count:    d.count||0,
+      url
+    };
+  }catch(e){
+    console.warn('Proxy indisponible:',e.message);
+    return{incident:false,travaux:false,count:0,url};
+  }
+}
+
+
+let windChartInstance = null;
+
+async function fetchWindHistory(lat, lon) {
+  const now = new Date();
+  const startDt = new Date(now - 4 * 3600 * 1000);
+  const pad = n => String(n).padStart(2,'0');
+  const fmt = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:00`;
+
+  const params = new URLSearchParams({
+    latitude: lat, longitude: lon,
+    hourly: 'wind_gusts_10m,wind_speed_10m',
+    timezone: 'Europe/Paris',
+    wind_speed_unit: 'kmh',
+    start_hour: fmt(startDt),
+    end_hour: fmt(new Date(now.getTime() + 3 * 3600 * 1000))
+  });
+  const r = await fetch(`https://api.open-meteo.com/v1/forecast?${params}`);
+  return await r.json();
+}
+
+function drawWindChart(data, lat, lon) {
+  const times = data.hourly.time;
+  const gusts = data.hourly.wind_gusts_10m;
+  const speeds = data.hourly.wind_speed_10m;
+
+  const now = new Date();
+  const nowStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}T${String(now.getHours()).padStart(2,'0')}:00`;
+  const nowIdx = times.findIndex(t => t >= nowStr);
+
+  const labels = times.map(t => {
+    const d = new Date(t);
+    return `${String(d.getHours()).padStart(2,'0')}h`;
+  });
+
+  const panel = document.getElementById('graph-panel');
+  panel.style.display = 'block';
+
+  if (windChartInstance) windChartInstance.destroy();
+
+  const ctx = document.getElementById('windChart').getContext('2d');
+
+  // Zone passé vs futur via background plugin
+  windChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Rafales',
+          data: gusts,
+          borderColor: '#ef4444',
+          backgroundColor: 'rgba(239,68,68,.1)',
+          borderWidth: 2,
+          pointRadius: 3,
+          tension: 0.3,
+          fill: true
+        },
+        {
+          label: 'Vent moyen',
+          data: speeds,
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,.05)',
+          borderWidth: 2,
+          pointRadius: 3,
+          tension: 0.3,
+          fill: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        annotation: {}
+      },
+      scales: {
+        x: { grid: { color: 'rgba(0,0,0,.06)' } },
+        y: { grid: { color: 'rgba(0,0,0,.06)' }, title: { display: true, text: 'km/h' } }
+      }
+    },
+    plugins: [{
+      id: 'nowLine',
+      afterDraw(chart) {
+        if (nowIdx < 0) return;
+        const {ctx, chartArea, scales} = chart;
+        const x = scales.x.getPixelForValue(nowIdx);
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(x, chartArea.top);
+        ctx.lineTo(x, chartArea.bottom);
+        ctx.strokeStyle = '#9ca3af';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5,4]);
+        ctx.stroke();
+        ctx.fillStyle = '#6b7280';
+        ctx.font = '11px system-ui';
+        ctx.fillText('maintenant', x + 4, chartArea.top + 14);
+        ctx.restore();
+      }
+    }]
+  });
+}
+
+document.getElementById('form').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const ST=document.getElementById('status'), RE=document.getElementById('results');
+  const fd=new FormData(e.target);
+  const addr=fd.get('address')?.trim(), xv=parseFloat(fd.get('x')), yv=parseFloat(fd.get('y')), thr=parseFloat(fd.get('threshold'))||70;
+  e.target.reset(); e.target.querySelector('[name=threshold]').value='70';
+  ST.className='status loading'; ST.textContent='Analyse...'; RE.innerHTML='';
+
+  try{
+    let lat,lon,cp,street='',city,insee,src;
+
+    if(xv&&yv&&!isNaN(xv)&&!isNaN(yv)){
+      const c=lambert2wgs(xv,yv);
+      lat=c.lat; lon=c.lon; src=`X/Y ${xv}/${yv}`;
+      const g=await revGeo(lat,lon);
+      if(!g)throw new Error('Reverse géocodage échoué');
+      ({cp,street,city,insee}=g);
+    } else if(addr){
+      const g=await geoDirect(addr);
+      if(!g)throw new Error('Adresse introuvable');
+      ({lat,lon,cp,street,city,insee}=g); src=addr;
+    } else throw new Error('Adresse ou X/Y requis');
+
+    ST.textContent='Météo + couverture réseau...';
+    const[cur,ore]=await Promise.all([meteo(lat,lon),oreCheck(insee)]);
+
+    const rafales=cur.wind_gusts_10m||0, code=cur.weather_code||0;
+    const ventFort=rafales>=thr, orage=ORAGE.includes(code), neige=NEIGE.includes(code);
+
+    function enedisTileHTML(label, inc, loading){
+      const eCls=!ore.covered?'tile warn':(loading?'tile loading':(inc.incident?'tile alert':(inc.travaux?'tile warn':'tile safe')));
+      const eVal=!ore.covered?'NON COUVERT':(loading?'…':(inc.incident?'INCIDENT':(inc.travaux?'TRAVAUX':'NON')));
+      let eTxt=!ore.covered?ore.grd:(loading?'':'—');
+      if(ore.covered&&!loading&&(inc.incident||inc.travaux)){
+        eTxt=inc.dateRetablissement?`Rétablissement : ${inc.dateRetablissement}`:(inc.count>0?`${inc.count} clients`:'—');
+      }
+      const lien=(!loading&&inc.url)?`<a href="${inc.url}" target="_blank" class="elink">🔗</a>`:'';
+      const spinner=loading?`<div class="enedis-spinner"></div>`:'';
+      return `<div class="${eCls}"><div class="tile-title">Enedis — ${label}</div><div class="tile-value">${eVal}</div><div>${eTxt} ${lien}${spinner}</div></div>`;
+    }
+
+    function renderAll(streetInc, communeInc){
+      const alerte=ventFort||orage||neige||
+        (streetInc&&!streetInc._loading&&(streetInc.incident||streetInc.travaux))||
+        (communeInc&&!communeInc._loading&&(communeInc.incident||communeInc.travaux));
+
+      let enedisTiles='';
+      if(street && streetInc!==undefined){
+        enedisTiles+=enedisTileHTML('Adresse', streetInc, !!streetInc?._loading);
+      }
+      if(communeInc!==undefined){
+        enedisTiles+=enedisTileHTML('Commune', communeInc, !!communeInc?._loading);
+      }
+
+      RE.innerHTML=`
+        <div class="banner ${alerte?'alert':'safe'}">${alerte?'🚨 ÉVÈNEMENT':'✅ NORMAL'}</div>
+        <div class="grid">
+          <div class="tile ${ventFort?'alert':'safe'}"><div class="tile-title">Rafales</div><div class="tile-value">${ventFort?'OUI':'NON'}</div><div>${rafales.toFixed(1)} km/h</div></div>
+          <div class="tile ${orage?'alert':'safe'}"><div class="tile-title">Orage</div><div class="tile-value">${orage?'OUI':'NON'}</div><div>WMO ${code}</div></div>
+          <div class="tile ${neige?'alert':'safe'}"><div class="tile-title">Neige</div><div class="tile-value">${neige?'OUI':'NON'}</div><div>WMO ${code}</div></div>
+          ${enedisTiles}
+        </div>
+        <div class="meta">
+          <div><b>Source:</b> ${src}</div>
+          <div><b>GPS:</b> ${lat.toFixed(5)}° ${lon.toFixed(5)}°</div>
+          <div><b>CP/INSEE:</b> ${cp} / ${insee}</div>
+          <div><b>Ville:</b> ${city}</div>
+          <div><b>Rue:</b> ${street||'—'}</div>
+          ${!ore.covered?`<div><b>GRD:</b> ${ore.grd}</div>`:''}
+        </div>`;
+    }
+
+    // ── Météo immédiate ──
+    const loadingInc={_loading:true,incident:false,travaux:false,count:0,dateRetablissement:null,url:null};
+    renderAll(street?loadingInc:undefined, loadingInc);
+    fetchWindHistory(lat,lon).then(wdata=>drawWindChart(wdata,lat,lon));
+
+    if(!ore.covered){
+      const noInc={incident:false,travaux:false,count:0,dateRetablissement:null,url:enedisUrl(cp,street,city,insee,lat,lon)};
+      renderAll(street?noInc:undefined, noInc);
+      ST.className='status ok'; ST.textContent='✅ Terminé';
+    } else {
+      ST.textContent='Enedis en cours…';
+
+      // Lancer les deux appels en parallèle via le proxy (qui fait les deux en interne)
+      enedisIncidents(cp,street,city,insee,lat,lon).then(inc=>{
+        // inc contient urlStreet et urlCommune du proxy
+        const streetResult = street ? {
+          incident: inc.blocStreet==='incident', travaux: inc.blocStreet==='travaux'||inc.blocStreet==='vigilance',
+          count: inc.count, dateRetablissement: inc.dateRetablissement,
+          url: inc.urlStreet||enedisUrl(cp,street,city,insee,lat,lon)
+        } : undefined;
+        const communeResult = {
+          incident: inc.blocCommune==='incident', travaux: inc.blocCommune==='travaux'||inc.blocCommune==='vigilance',
+          count: inc.count, dateRetablissement: inc.dateRetablissement,
+          url: inc.urlCommune||enedisUrl(cp,'',city,insee,lat,lon)
+        };
+        renderAll(streetResult, communeResult);
+        const alerte=ventFort||orage||neige||inc.incident||inc.travaux;
+        ST.className=alerte?'status err':'status ok';
+        ST.textContent=alerte?'🚨 Événement détecté':'✅ Terminé';
+      }).catch(()=>{
+        const noInc={incident:false,travaux:false,count:0,dateRetablissement:null,url:enedisUrl(cp,street,city,insee,lat,lon)};
+        renderAll(street?noInc:undefined,noInc);
+        ST.className='status ok'; ST.textContent='✅ Météo OK (Enedis indisponible)';
+      });
+    }
+}catch(err){ST.className='status err'; ST.textContent='❌ '+err.message;}
+});
+</script>
+</body>
+</html>
