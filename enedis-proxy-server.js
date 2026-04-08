@@ -4,13 +4,15 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
 
 let browser = null;
 
 async function getBrowser() {
   if (!browser || !browser.isConnected()) {
-    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
   }
   return browser;
 }
@@ -57,55 +59,80 @@ app.get('/enedis', async (req, res) => {
       'Accept-Language': 'fr-FR,fr;q=0.9'
     });
 
+    // Bloquer images/fonts
     await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,eot}', r => r.abort());
+
+    // ✅ Intercepter les requêtes JSON S3 Enedis
+    const intercepted = [];
+    page.on('response', async (response) => {
+      const rUrl = response.url();
+      if (rUrl.includes('/sites/default/files/json') && rUrl.includes('.json')) {
+        try {
+          const body = await response.json();
+          intercepted.push({ url: rUrl, body });
+          console.log(`[JSON] ${rUrl} →`, JSON.stringify(body).substring(0, 200));
+        } catch(e) {
+          console.log(`[JSON-ERR] ${rUrl}: ${e.message}`);
+        }
+      }
+    });
 
     await page.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
 
-    // Attendre que le JS ait fini de traiter :
-    // - soit le modal "non couvert" est VISIBLE (display:flex) et reste visible → vraiment non couvert
-    // - soit il était présent dans le HTML mais le JS l'a masqué → la commune EST couverte
-    // → attendre que display:flex disparaisse OU qu'un résultat apparaisse, max 10s
-    await page.waitForFunction(() => {
-      const modal = document.querySelector('.js-modal-resultPanne');
-      if (!modal) return true; // pas de modal du tout → OK
-      const style = window.getComputedStyle(modal);
-      // Modal masqué par JS → la commune est couverte, les vrais résultats sont là
-      return style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
-    }, { timeout: 10000 }).catch(() => {
-      // Timeout : le modal est resté visible → vraiment non couvert
-      console.log(`[INFO] Modal resté visible pour ${insee}`);
-    });
+    // Attendre un peu plus pour les appels asynchrones tardifs
+    await page.waitForTimeout(3000);
 
-    // Attendre un peu plus pour les résultats réels
-    await page.waitForTimeout(2000);
+    console.log(`[INTERCEPT] ${intercepted.length} fichiers JSON capturés pour ${insee}`);
+    intercepted.forEach(i => console.log(`  → ${i.url}`));
 
-    const result = await page.evaluate(() => {
-      const modal = document.querySelector('.js-modal-resultPanne');
-      const modalVisible = modal && window.getComputedStyle(modal).display !== 'none';
+    let result;
 
-      if (modalVisible) {
-        return { nonCouvert: true, incident: false, travaux: false, count: 0 };
+    if (intercepted.length > 0) {
+      // Analyser les JSON interceptés
+      let incident = false, travaux = false, nonCouvert = false, count = 0;
+
+      for (const { url: jUrl, body } of intercepted) {
+        const raw = JSON.stringify(body).toLowerCase();
+        console.log(`[ANALYZE] ${jUrl}: ${raw.substring(0, 300)}`);
+
+        // Détecter non couvert
+        if (raw.includes('non couvert') || raw.includes('non_couvert') || raw.includes('not_covered')) {
+          nonCouvert = true;
+        }
+        // Détecter travaux
+        if (raw.includes('travaux') || raw.includes('work') || raw.includes('planned')) {
+          travaux = true;
+        }
+        // Détecter incident
+        if (raw.includes('incident') || raw.includes('panne') || raw.includes('unplanned') || raw.includes('coupure')) {
+          incident = true;
+        }
+        // Nombre clients
+        const mClient = raw.match(/"(?:nb_clients?|clients?|nombre_clients?|nbclient)"\s*:\s*(\d+)/i);
+        if (mClient) count = Math.max(count, parseInt(mClient[1]));
       }
 
-      const body  = document.body.innerText || '';
-      const bodyL = body.toLowerCase();
+      result = { nonCouvert, incident, travaux, count, interceptedUrls: intercepted.map(i => i.url) };
 
-      const travaux =
-        bodyL.includes('travaux en cours') ||
-        bodyL.includes('travaux programm') ||
-        bodyL.includes('travaux préventifs');
+    } else {
+      // Fallback : lire le DOM rendu
+      console.log(`[FALLBACK DOM] Aucun JSON intercepté pour ${insee}`);
+      result = await page.evaluate(() => {
+        const modal = document.querySelector('.js-modal-resultPanne');
+        const modalVisible = modal && window.getComputedStyle(modal).display !== 'none'
+                             && window.getComputedStyle(modal).display !== '';
 
-      const incident =
-        bodyL.includes('incident en cours') ||
-        bodyL.includes('panne en cours') ||
-        bodyL.includes('interruption non programm') ||
-        bodyL.includes('coupure en cours');
+        if (modalVisible) return { nonCouvert: true, incident: false, travaux: false, count: 0 };
 
-      const m = body.match(/(\d[\d\s]*)\s*client/i);
-      const count = m ? parseInt(m[1].replace(/\s/g, ''), 10) : 0;
-
-      return { nonCouvert: false, incident, travaux, count };
-    });
+        const body  = document.body.innerText || '';
+        const bodyL = body.toLowerCase();
+        const travaux  = bodyL.includes('travaux en cours') || bodyL.includes('travaux programm');
+        const incident = bodyL.includes('incident en cours') || bodyL.includes('panne en cours') || bodyL.includes('interruption non programm');
+        const m = body.match(/(\d[\d\s]*)\s*client/i);
+        const count = m ? parseInt(m[1].replace(/\s/g, ''), 10) : 0;
+        return { nonCouvert: false, incident, travaux, count };
+      });
+    }
 
     console.log(`[RESULT] ${insee} →`, result);
     result.url = url;
@@ -117,6 +144,7 @@ app.get('/enedis', async (req, res) => {
     }
 
     res.json(result);
+
   } catch (err) {
     console.error(`[ERROR] ${err.message}`);
     res.status(500).json({ error: err.message, url });
@@ -126,7 +154,7 @@ app.get('/enedis', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`Proxy Enedis -> http://0.0.0.0:${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Proxy Enedis → http://0.0.0.0:${PORT}`));
 
 process.on('SIGTERM', async () => { if (browser) await browser.close(); process.exit(0); });
 process.on('SIGINT',  async () => { if (browser) await browser.close(); process.exit(0); });
