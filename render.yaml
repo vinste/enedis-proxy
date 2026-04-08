@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: enedis-proxy
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 3001
+    healthCheckPath: /health
+    autoDeploy: true

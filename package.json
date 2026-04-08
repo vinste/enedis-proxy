@@ -1,0 +1,14 @@
+{
+  "name": "enedis-proxy",
+  "version": "1.0.0",
+  "description": "Proxy Playwright pour scraper Enedis pannes/travaux",
+  "main": "enedis-proxy-server.js",
+  "scripts": {
+    "start": "node enedis-proxy-server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "playwright": "^1.42.0"
+  }
+}
