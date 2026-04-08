@@ -15,7 +15,6 @@ async function getBrowser() {
   return browser;
 }
 
-// Cache TTL 2 min
 const cache = new Map();
 const CACHE_TTL = 2 * 60 * 1000;
 
@@ -58,45 +57,50 @@ app.get('/enedis', async (req, res) => {
       'Accept-Language': 'fr-FR,fr;q=0.9'
     });
 
-    // Bloquer images/fonts pour aller plus vite
     await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,eot}', r => r.abort());
 
     await page.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
 
-    // Attendre qu'un élément résultat apparaisse
-    await Promise.race([
-      page.waitForSelector('[class*="result"], [class*="panne"], [class*="travaux"], .js-modal-resultPanne', { timeout: 8000 }),
-      page.waitForTimeout(8000)
-    ]);
+    // Attendre que le JS ait fini de traiter :
+    // - soit le modal "non couvert" est VISIBLE (display:flex) et reste visible → vraiment non couvert
+    // - soit il était présent dans le HTML mais le JS l'a masqué → la commune EST couverte
+    // → attendre que display:flex disparaisse OU qu'un résultat apparaisse, max 10s
+    await page.waitForFunction(() => {
+      const modal = document.querySelector('.js-modal-resultPanne');
+      if (!modal) return true; // pas de modal du tout → OK
+      const style = window.getComputedStyle(modal);
+      // Modal masqué par JS → la commune est couverte, les vrais résultats sont là
+      return style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0';
+    }, { timeout: 10000 }).catch(() => {
+      // Timeout : le modal est resté visible → vraiment non couvert
+      console.log(`[INFO] Modal resté visible pour ${insee}`);
+    });
+
+    // Attendre un peu plus pour les résultats réels
+    await page.waitForTimeout(2000);
 
     const result = await page.evaluate(() => {
+      const modal = document.querySelector('.js-modal-resultPanne');
+      const modalVisible = modal && window.getComputedStyle(modal).display !== 'none';
+
+      if (modalVisible) {
+        return { nonCouvert: true, incident: false, travaux: false, count: 0 };
+      }
+
       const body  = document.body.innerText || '';
       const bodyL = body.toLowerCase();
-      const htmlL = document.body.innerHTML.toLowerCase();
 
-      // Non couvert Enedis
-      const nonCouvert =
-        htmlL.includes("n'est pas g\u00e9r\u00e9e par enedis") ||
-        htmlL.includes("n\u2019est pas g\u00e9r\u00e9e par enedis") ||
-        htmlL.includes("n'intervenons pas sur cette commune") ||
-        htmlL.includes("n\u2019intervenons pas sur cette commune");
-
-      if (nonCouvert) return { nonCouvert: true, incident: false, travaux: false, count: 0 };
-
-      // Travaux
       const travaux =
         bodyL.includes('travaux en cours') ||
         bodyL.includes('travaux programm') ||
-        bodyL.includes('travaux pr\u00e9ventifs');
+        bodyL.includes('travaux préventifs');
 
-      // Incidents
       const incident =
         bodyL.includes('incident en cours') ||
         bodyL.includes('panne en cours') ||
         bodyL.includes('interruption non programm') ||
         bodyL.includes('coupure en cours');
 
-      // Nombre clients
       const m = body.match(/(\d[\d\s]*)\s*client/i);
       const count = m ? parseInt(m[1].replace(/\s/g, ''), 10) : 0;
 
@@ -108,7 +112,6 @@ app.get('/enedis', async (req, res) => {
     result.cachedAt = new Date().toISOString();
 
     cache.set(cacheKey, result);
-    // Purge vieux cache
     for (const k of cache.keys()) {
       if (k !== cacheKey && k.startsWith(insee + '_')) cache.delete(k);
     }
@@ -123,8 +126,7 @@ app.get('/enedis', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => console.log(`🚀 Proxy Enedis → http://0.0.0.0:${PORT}`));
+app.listen(PORT, '0.0.0.0', () => console.log(`Proxy Enedis -> http://0.0.0.0:${PORT}`));
 
-// Garder le browser vivant
 process.on('SIGTERM', async () => { if (browser) await browser.close(); process.exit(0); });
 process.on('SIGINT',  async () => { if (browser) await browser.close(); process.exit(0); });
