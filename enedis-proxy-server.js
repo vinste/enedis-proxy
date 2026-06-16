@@ -65,12 +65,21 @@ async function scrapePage(page, url) {
   }
 
   return await page.evaluate(() => {
-    function isVisible(el) {
-      if (!el) return false;
-      const s = window.getComputedStyle(el);
-      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'
-        && !el.classList.contains('template-hidden')
-        && !el.classList.contains('hidden');
+
+    // ── MÉTHODE DE DÉTECTION CORRECTE ──────────────────────────────────────────
+    // Enedis place TOUS les blocs dans le DOM en permanence.
+    // Le bloc actif est celui dont le .tagStatus interne N'A PAS la classe
+    // 'template-hidden'. Les blocs inactifs ont toujours 'template-hidden'.
+    // getComputedStyle() ne suffit pas car les blocs parents sont tous visibles.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    function isActive(blocEl) {
+      if (!blocEl) return false;
+      // Le tagStatus est l'indicateur d'état réel
+      const tag = blocEl.querySelector('.tagStatus');
+      if (tag) return !tag.classList.contains('template-hidden');
+      // Fallback : le bloc lui-même ne doit pas avoir template-hidden
+      return !blocEl.classList.contains('template-hidden');
     }
 
     function getDate(bloc) {
@@ -86,33 +95,36 @@ async function scrapePage(page, url) {
       return m ? parseInt(m[1].replace(/\s/g, ''), 10) : 0;
     }
 
-    // non-couvert
+    // non-couvert (modal spéciale — conserve l'ancienne détection)
     const modal = document.querySelector('.js-modal-resultPanne');
-    if (modal && isVisible(modal))
-      return { nonCouvert: true, incident: false, travaux: false, vigilance: false, count: 0, dateRetablissement: null, bloc: 'non-couvert' };
+    if (modal && !modal.classList.contains('template-hidden') && !modal.classList.contains('hidden'))
+      return { nonCouvert: true, incident: false, travaux: false, vigilance: false, delestage: false, count: 0, dateRetablissement: null, bloc: 'non-couvert' };
 
-    // travaux (coupure programmée — priorité sur incident car plus précis)
-    const blocTravaux = document.querySelector('[class*="bloc-travaux"]');
-    if (blocTravaux && isVisible(blocTravaux))
-      return { nonCouvert: false, incident: false, travaux: true, vigilance: false, count: getCount(blocTravaux), dateRetablissement: getDate(blocTravaux), bloc: 'travaux' };
-
-    // incident (coupure en cours)
+    // Ordre de priorité : incident > travaux > vigilance > délestage > courant-rétabli > aucune-coupure
     const blocIncident = document.querySelector('[class*="bloc-incident"]');
-    if (blocIncident && isVisible(blocIncident))
-      return { nonCouvert: false, incident: true, travaux: false, vigilance: false, count: getCount(blocIncident), dateRetablissement: getDate(blocIncident), bloc: 'incident' };
+    if (blocIncident && isActive(blocIncident))
+      return { nonCouvert: false, incident: true, travaux: false, vigilance: false, delestage: false, count: getCount(blocIncident), dateRetablissement: getDate(blocIncident), bloc: 'incident' };
 
-    // FIX BUG 2 — vigilance = alerte météo/risque, PAS des travaux
-    // On l'expose séparément plutôt que de le faire passer pour travaux: true
+    const blocTravaux = document.querySelector('[class*="bloc-travaux"]');
+    if (blocTravaux && isActive(blocTravaux))
+      return { nonCouvert: false, incident: false, travaux: true, vigilance: false, delestage: false, count: getCount(blocTravaux), dateRetablissement: getDate(blocTravaux), bloc: 'travaux' };
+
+    // vigilance = alerte météo préventive, PAS des travaux
     const blocVigilance = document.querySelector('[class*="bloc-vigilance"]');
-    if (blocVigilance && isVisible(blocVigilance))
-      return { nonCouvert: false, incident: false, travaux: false, vigilance: true, count: getCount(blocVigilance), dateRetablissement: getDate(blocVigilance), bloc: 'vigilance' };
+    if (blocVigilance && isActive(blocVigilance))
+      return { nonCouvert: false, incident: false, travaux: false, vigilance: true, delestage: false, count: 0, dateRetablissement: getDate(blocVigilance), bloc: 'vigilance' };
+
+    // délestage (bloc-de)
+    const blocDe = document.querySelector('[class*="bloc-de"]');
+    if (blocDe && isActive(blocDe))
+      return { nonCouvert: false, incident: false, travaux: false, vigilance: false, delestage: true, count: getCount(blocDe), dateRetablissement: getDate(blocDe), bloc: 'delestage' };
 
     // courant rétabli
     const blocRetabli = document.querySelector('[class*="bloc-courant-retabli"]');
-    if (blocRetabli && isVisible(blocRetabli))
-      return { nonCouvert: false, incident: false, travaux: false, vigilance: false, count: 0, dateRetablissement: null, bloc: 'courant-retabli' };
+    if (blocRetabli && isActive(blocRetabli))
+      return { nonCouvert: false, incident: false, travaux: false, vigilance: false, delestage: false, count: 0, dateRetablissement: null, bloc: 'courant-retabli' };
 
-    return { nonCouvert: false, incident: false, travaux: false, vigilance: false, count: 0, dateRetablissement: null, bloc: 'aucune-coupure' };
+    return { nonCouvert: false, incident: false, travaux: false, vigilance: false, delestage: false, count: 0, dateRetablissement: null, bloc: 'aucune-coupure' };
   });
 }
 
