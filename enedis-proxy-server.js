@@ -56,12 +56,12 @@ async function scrapePage(page, url) {
         if (!el) return false;
         const s = window.getComputedStyle(el);
         return s.display !== 'none' && s.visibility !== 'hidden'
-            && !el.classList.contains('template-hidden')
-            && !el.classList.contains('hidden');
+          && !el.classList.contains('template-hidden')
+          && !el.classList.contains('hidden');
       });
     }, RESULT_SELECTORS, { timeout: 12000 });
   } catch(e) {
-    console.log(`[WARN] Timeout pour ${url.substring(0,80)}`);
+    console.log(`[WARN] Timeout waitForFunction pour ${url.substring(0, 80)}`);
   }
 
   return await page.evaluate(() => {
@@ -69,61 +69,67 @@ async function scrapePage(page, url) {
       if (!el) return false;
       const s = window.getComputedStyle(el);
       return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'
-          && !el.classList.contains('template-hidden')
-          && !el.classList.contains('hidden');
+        && !el.classList.contains('template-hidden')
+        && !el.classList.contains('hidden');
     }
+
     function getDate(bloc) {
       if (!bloc) return null;
       const el = bloc.querySelector('.js-CoupureDate');
       if (el && el.innerText.trim()) return el.innerText.trim();
-      const m = (bloc.innerText||'').match(/rétablissement[^:]*:\s*([^\n]{3,40})/i);
+      const m = (bloc.innerText || '').match(/rétablissement[^:]*:\s*([^\n]{3,40})/i);
       return m ? m[1].trim() : null;
     }
+
     function getCount(bloc) {
-      const m = (bloc && bloc.innerText||'').match(/(\d[\d\s]*)\s*client/i);
-      return m ? parseInt(m[1].replace(/\s/g,''), 10) : 0;
+      const m = (bloc && bloc.innerText || '').match(/(\d[\d\s]*)\s*client/i);
+      return m ? parseInt(m[1].replace(/\s/g, ''), 10) : 0;
     }
 
+    // non-couvert
     const modal = document.querySelector('.js-modal-resultPanne');
     if (modal && isVisible(modal))
-      return { nonCouvert: true, incident: false, travaux: false, count: 0, dateRetablissement: null, bloc: 'non-couvert' };
+      return { nonCouvert: true, incident: false, travaux: false, vigilance: false, count: 0, dateRetablissement: null, bloc: 'non-couvert' };
 
+    // travaux (coupure programmée — priorité sur incident car plus précis)
     const blocTravaux = document.querySelector('[class*="bloc-travaux"]');
     if (blocTravaux && isVisible(blocTravaux))
-      return { nonCouvert: false, incident: false, travaux: true, count: getCount(blocTravaux), dateRetablissement: getDate(blocTravaux), bloc: 'travaux' };
+      return { nonCouvert: false, incident: false, travaux: true, vigilance: false, count: getCount(blocTravaux), dateRetablissement: getDate(blocTravaux), bloc: 'travaux' };
 
+    // incident (coupure en cours)
     const blocIncident = document.querySelector('[class*="bloc-incident"]');
     if (blocIncident && isVisible(blocIncident))
-      return { nonCouvert: false, incident: true, travaux: false, count: getCount(blocIncident), dateRetablissement: getDate(blocIncident), bloc: 'incident' };
+      return { nonCouvert: false, incident: true, travaux: false, vigilance: false, count: getCount(blocIncident), dateRetablissement: getDate(blocIncident), bloc: 'incident' };
 
+    // FIX BUG 2 — vigilance = alerte météo/risque, PAS des travaux
+    // On l'expose séparément plutôt que de le faire passer pour travaux: true
     const blocVigilance = document.querySelector('[class*="bloc-vigilance"]');
     if (blocVigilance && isVisible(blocVigilance))
-      return { nonCouvert: false, incident: false, travaux: true, count: getCount(blocVigilance), dateRetablissement: getDate(blocVigilance), bloc: 'vigilance' };
+      return { nonCouvert: false, incident: false, travaux: false, vigilance: true, count: getCount(blocVigilance), dateRetablissement: getDate(blocVigilance), bloc: 'vigilance' };
 
+    // courant rétabli
     const blocRetabli = document.querySelector('[class*="bloc-courant-retabli"]');
     if (blocRetabli && isVisible(blocRetabli))
-      return { nonCouvert: false, incident: false, travaux: false, count: 0, dateRetablissement: null, bloc: 'courant-retabli' };
+      return { nonCouvert: false, incident: false, travaux: false, vigilance: false, count: 0, dateRetablissement: null, bloc: 'courant-retabli' };
 
-    return { nonCouvert: false, incident: false, travaux: false, count: 0, dateRetablissement: null, bloc: 'aucune-coupure' };
+    return { nonCouvert: false, incident: false, travaux: false, vigilance: false, count: 0, dateRetablissement: null, bloc: 'aucune-coupure' };
   });
 }
 
-function mergeResults(street, commune) {
-  // Non couvert : si la commune est non couverte, c'est définitif
-  if (commune.nonCouvert) return { ...commune, scope: 'commune' };
+// FIX BUG 1 — priorité absolue à l'adresse précise (street) sur la commune
+// La commune ne sert que de fallback si aucune rue n'a pu être scrapée
+function mergeResults(streetResult, communeResult, hasStreetUrl) {
+  // Si la commune est non couverte par Enedis, c'est définitif
+  if (communeResult.nonCouvert) return { ...communeResult, scope: 'commune' };
 
-  // Fusionner : incident > travaux > aucune-coupure
-  const merged = {
-    nonCouvert: false,
-    incident:   street.incident   || commune.incident,
-    travaux:    street.travaux    || commune.travaux,
-    // Priorité adresse sur commune pour count et date
-    count:      street.count || commune.count,
-    dateRetablissement: street.dateRetablissement || commune.dateRetablissement,
-    blocStreet:  street.bloc,
-    blocCommune: commune.bloc,
-  };
-  return merged;
+  // Si on avait une URL street ET qu'elle a retourné un résultat exploitable,
+  // on lui fait confiance entièrement — pas de OR avec la commune
+  if (hasStreetUrl && streetResult.bloc !== 'n/a') {
+    return { ...streetResult, scope: 'street', blocCommune: communeResult.bloc };
+  }
+
+  // Pas de street disponible : on utilise la commune seule
+  return { ...communeResult, scope: 'commune', blocStreet: 'n/a' };
 }
 
 app.get('/health', (_, res) => res.json({ ok: true, ts: new Date().toISOString() }));
@@ -132,14 +138,18 @@ app.get('/enedis', async (req, res) => {
   const { cp = '', street = '', city = '', insee, lat, lon } = req.query;
   if (!insee || !lat || !lon) return res.status(400).json({ error: 'insee, lat, lon requis' });
 
-  const cacheKey = `${insee}_${street}_${Math.floor(Date.now() / CACHE_TTL)}`;
+  // FIX BUG 3 — clé de cache incluant lat/lon arrondis pour éviter collisions intra-commune
+  const latR = parseFloat(lat).toFixed(3);
+  const lonR = parseFloat(lon).toFixed(3);
+  const cacheKey = `${insee}_${street}_${latR}_${lonR}_${Math.floor(Date.now() / CACHE_TTL)}`;
+
   if (cache.has(cacheKey)) {
-    console.log(`[CACHE] ${insee}`);
+    console.log(`[CACHE] ${cacheKey}`);
     return res.json(cache.get(cacheKey));
   }
 
-  const urlStreet    = street ? buildEnedisUrl(cp, street, city, insee, lat, lon, 'street')   : null;
-  const urlCommune   = buildEnedisUrl(cp, street, city, insee, lat, lon, 'municipality');
+  const urlStreet  = street ? buildEnedisUrl(cp, street, city, insee, lat, lon, 'street') : null;
+  const urlCommune = buildEnedisUrl(cp, street, city, insee, lat, lon, 'municipality');
 
   let page = null;
   try {
@@ -151,18 +161,16 @@ app.get('/enedis', async (req, res) => {
     });
     await page.route('**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,eot}', r => r.abort());
 
-    // Scrape adresse (si rue disponible)
-    let resultStreet = { nonCouvert: false, incident: false, travaux: false, count: 0, dateRetablissement: null, bloc: 'n/a' };
+    let resultStreet = { nonCouvert: false, incident: false, travaux: false, vigilance: false, count: 0, dateRetablissement: null, bloc: 'n/a' };
     if (urlStreet) {
       resultStreet = await scrapePage(page, urlStreet);
       console.log(`[STREET]  ${insee} →`, JSON.stringify(resultStreet));
     }
 
-    // Scrape commune
     const resultCommune = await scrapePage(page, urlCommune);
     console.log(`[COMMUNE] ${insee} →`, JSON.stringify(resultCommune));
 
-    const result = mergeResults(resultStreet, resultCommune);
+    const result = mergeResults(resultStreet, resultCommune, !!urlStreet);
     result.urlStreet  = urlStreet;
     result.urlCommune = urlCommune;
     result.cachedAt   = new Date().toISOString();
